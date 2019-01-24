@@ -1,10 +1,10 @@
 from qtpy import QtCore, QtWidgets,QtGui
 
 import qimage2ndarray as qnd
-import tifffile
-from qtpy.QtCore import 
+import tifffile as tf
 
-from qtpy.QtWidgets import QWidget,QApplication,QSlider,QMainWindow,QLabel,QGridLayout,QLineEdit,QDoubleSpinBox,QVBoxLayout,QPushButton,QSizePolicy, QAction, QFileDialog
+
+from qtpy.QtWidgets import QWidget,QApplication,QSlider,QMainWindow,QLabel,QGridLayout,QLineEdit,QDoubleSpinBox,QVBoxLayout,QHBoxLayout,QPushButton,QSizePolicy, QAction, QFileDialog,QSpinBox, QFrame
 from qtpy.QtCore import QTimer, Qt, QDir
 import numpy as np
 import sys
@@ -13,19 +13,25 @@ import os
 
 class QTiffStackPlayer(QMainWindow):
     
+    #Main Window is also going to act as the controller. 
+    
+    
     def __init__(self,parent = None):
         super(QTiffStackPlayer,self).__init__(parent)
         
         self.setWindowTitle('Tiff Stack Player')
         
-        self.videoviewer = QTiffStackView('&Open',self)
-        self.videoviewer.setSizePolicy(QSizePolicy.MinimumExpanding,QSizePolicy.MinimumExpanding)
+        self.videoviewer = QTiffStackView()
+        #self.videoviewer.setSizePolicy(QSizePolicy.MinimumExpanding,QSizePolicy.MinimumExpanding)
         
-        #backend controller and model (conforming to MVC design pattern)
+        #backend model (conforming to MVC design pattern)
         
-        self.videocontroller = None
-        self.model = None
         
+        self.model = QTiffStackModel()
+        
+        #as controller this class contains the video index
+        self.index = 0
+        self.counterconnected = False
         #Create new action
         
         openAction = QAction('&Open',self)
@@ -55,10 +61,21 @@ class QTiffStackPlayer(QMainWindow):
         errorLabel.setSizePolicy(QSizePolicy.Preferred,QSizePolicy.Maximum)
         
         layout = QVBoxLayout()
-        layout.addWidget(self.videoviewer)
-        layout.addWidget(errorLabel)
+        self.setCentralWidget(self.videoviewer)
         
+        #connect the signals from the viewer to the slots on the controller.
         
+        self.videoviewer.frametimer.timeout.connect(self.getFrame)
+        self.videoviewer.frametimer.timeout.connect(self.updateCounter)
+        
+        self.videoviewer.slideBar.valueChanged.connect(self.sliderChanged)
+        self.videoviewer.slideBar.valueChanged.connect(self.updateCounter)
+        self.videoviewer.play.clicked.connect(self.whenButtonPressed)
+        
+        self.videoviewer.counter.valueChanged.connect(self.counterChanged)
+        self.counterconnected = True       
+
+        self.show()
     def openFile(self):
         
         #called when user clicks on Open or presses ctrl+o
@@ -68,33 +85,91 @@ class QTiffStackPlayer(QMainWindow):
         
         fileName, _ = QFileDialog.getOpenFileName(self,"Choose Video or Image Stack",QDir.homePath())
         
-        if fileName != '' and fileName[-4:] == '.tif':
-            with tf.TiffFile(fileName) as tif:
-                frames = tif.asarray()
-                
-        
+
+   
         if self.model is None:
-            self.model = QTiffStackModel(frames)
+            self.model = QTiffStackModel()
             
-        else:
-            self.model.addFrames(frames)
-                               
+        
+        self.model.addFrames(fileName)
+                  
+        if self.model.frames is not None:
+            self.videoviewer.updateRanges(self.model.videolength-1)
+            
             
             
     def exitCall(self):
         sys.exit(app.exec_())
         
+
+     
+    def getFrame(self):
         
+        #each time this is called the frame is incremented. 
+        self.index +=1
+        
+        if self.model.frames is None:
+            msgbox = QtWidgets.QMessageBox()
+            msgbox.setText('No frames have been added!')
+            msgbox.exec_()
+         
+        elif self.index < self.model.videolength:
+            
+            self.videoviewer.frame_view.activeframe = self.model.frames.asarray(self.index)
+            self.videoviewer.frame_view.update()
+        else:
+            self.videoviewer.frametimer.stop()
+            self.index -=1
+            
+         
+    def sliderChanged(self):
+        if self.videoviewer.frametimer.isActive():
+            self.videoviewer.frametimer.stop()
+            self.videoviewer.counter.valueChanged.connect(self.counterChanged)
+            self.counterconnected = True
+        #have written get_frame() such that every time it is called the video index is incremented before continuing. Can't be bothered to change this. So before calling it, in order to make the slidebar value and frame number of frame displayed the same we -1.
+        self.index = self.videoviewer.slideBar.value() -1
+        self.getFrame()
     
+    def whenButtonPressed(self):
+        
+        if not self.videoviewer.frametimer.isActive():
+            
+            if self.counterconnected:
+                self.videoviewer.counter.valueChanged.disconnect(self.counterChanged)
+                self.counterconnected = False
+            self.videoviewer.frametimer.start()
+        else:
+            self.videoviewer.frametimer.stop()
+            if not self.counterconnected:
+                self.videoviewer.counter.valueChanged.connect(self.counterChanged)
+                self.counterconnected = True   
+    def updateCounter(self):
+        
+        self.videoviewer.counter.setValue(self.index)
+        
+        
+    def counterChanged(self):
+        self.videoviewer.slideBar.setValue(self.videoviewer.counter.value())
+        
 class QTiffStackModel():
     
     def __init__(self,frames = None):
         
         self.frames = frames
         
-    def addFrames(frames = None)
+    def addFrames(self,fileName):
+        
+        if fileName != '' and fileName[-4:] == '.tif':
+            
+                
+        
+            self.frames = tf.TiffFile(fileName) 
     
-        self.frames = frames 
+        #upon loading frames also store "meta data" i.e video length as this will be useful later
+        
+            self.videolength = self.frames.imagej_metadata['frames']
+        
     
     
 class QTiffStackView(QWidget):
@@ -103,13 +178,15 @@ class QTiffStackView(QWidget):
     
     
     def __init__(self):
-        
+        super(QTiffStackView,self).__init__()
         #add the image display. This is a subclass of QLabel, where paintEvent is overriden.
-        frame_view = FrameView()
+        self.frame_view = FrameView()
         
-        frame_view.setSizePolicy(QSizePolicy.Expanding)
+        #self.frame_view.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Expanding)
         
-        #add the slide bar which allows the user to manual flick through frames
+        #add the slide bar which allows the user to manual flick through 
+        
+       
         self.slideBar = QSlider(Qt.Horizontal)
         self.slideBar.setTickPosition(QSlider.TicksAbove)
         self.slideBar.setTracking(True)
@@ -121,13 +198,13 @@ class QTiffStackView(QWidget):
         self.counter.setRange(self.slideBar.minimum(),self.slideBar.maximum())
         
         #self explanatory
-        play = QPushButton('Play')
+        self.play = QPushButton('Play')
         
         #when play button is pressed the timer takes control of the displaying of frames
-        frametimer = QTimer()
+        self.frametimer = QTimer()
         
         frame_rate = 30
-        frametimer.setInterval(frame_rate)
+        self.frametimer.setInterval(frame_rate)
         
         #Add a sublayout to align the slidebar and frame counter next to eachother
         slidelyt = QHBoxLayout()
@@ -138,13 +215,19 @@ class QTiffStackView(QWidget):
         #Add the main layout for the widget
         lyt = QVBoxLayout()
         
-        lyt.addWidget(frame_view)
+        lyt.addWidget(self.frame_view)
         lyt.addLayout(slidelyt)
-        lyt.addWidget(play)
+        lyt.addWidget(self.play)
         
         self.setLayout(lyt)
         
+      
+    def updateRanges(self,maximum):
         
+        assert type(maximum) == int
+        
+        self.slideBar.setMaximum(maximum)
+        self.counter.setRange(self.slideBar.minimum(),self.slideBar.maximum())
         
         
         
@@ -154,21 +237,48 @@ class FrameView(QLabel):
     #Using a third party library we can convert the numpy array image data into a QPixmap which may be 'painted' on to the Label.
     
     def __init__(self, parent = None):
-        super().__init__(self)
+        super(FrameView,self).__init__()
         
         self.activeframe = None
         
+        #self.setFrameStyle(QFrame.Panel|QFrame.Sunken)
+        
+        
+        
     def paintEvent(self, e):
+        
         super().paintEvent(e)
         
-        qp = QtGui.QPainter(self)
         
-        maxintens = np.max(self.activeframe)
-        img = qnd.gray2qimage(self.activeframe,normalize = (0,maxintens))
         
-        pix = QtGui.QPixmap.fromImage(img)
+        if self.activeframe is not None:
+            maxintens = np.max(self.activeframe)
+            img = qnd.gray2qimage(self.activeframe,normalize = (0,maxintens))
+        
+            pix = QtGui.QPixmap.fromImage(img)
+            
+            pix = pix.scaled(self.size(),Qt.KeepAspectRatio)
+            self.setPixmap(pix)
+        else:
+            self.setText('No video displayed')
+            
+        
+        
+        
+if __name__ == '__main__':
     
+    
+    if not QtWidgets.QApplication.instance():
+        app = QtWidgets.QApplication(sys.argv)
+        
+    else:
+        app = QtWidgets.QApplication.instance()
         
         
+    player = QTiffStackPlayer()
+    
+    app.exec_()
+    
+
        
   
